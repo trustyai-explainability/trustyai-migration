@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 #
 # TrustyAI Metrics Backup Script
@@ -7,7 +7,7 @@
 # It exports the metrics configurations to a JSON file for later restoration.
 #
 
-set -e
+set -euo pipefail
 
 # Configuration
 NAMESPACE="${TRUSTYAI_NAMESPACE:-}"

@@ -1,4 +1,5 @@
-#!/bin/bash
+#!/usr/bin/env bash
+
 set -euo pipefail
 
 # This script is used to patch the GuardrailsOrchestrator deployment when upgrading from RHOAI 2.5 to 3.3
