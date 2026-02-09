@@ -6,141 +6,111 @@ If you want, you can backup and restore TrustyAI scheduled metrics during operat
 
 ## Fixes
 
-### GuardrailsOrchestrator readiness probe (RHOAI 2.25 -> 3.x)
+Prereqs: `oc` (and `oc login`). `jq` is optional (it just makes JSON output easier to read).
 
-This is intended to fix the GuardrailsOrchestrator issue where users see errors querying the guardrails `/health` and `/info` endpoints due to a misformatted `readinessProbe` / health port in the deployment template.
+### Fix 1: GuardrailsOrchestrator (RHOAI 2.25 -> 3.x)
 
-It does **not** address the breaking `spec.otelExporter` field changes (those require updating/removing that section in the CR before/after upgrade, depending on your desired configuration).
+This fix is relevant if you have GuardrailsOrchestrator instances and:
 
-#### Apply the patch (after upgrade)
+- your GuardrailsOrchestrator `/health` or `/info` endpoints return errors, or
+- you enabled OpenTelemetry on RHOAI 2.25 and now the `spec.otelExporter` fields are not compatible with RHOAI 3.x.
 
-1. Check if you have GuardrailsOrchestrator instances in your namespace:
+#### Step 0: Check if you have GuardrailsOrchestrator instances
 
 ```bash
 oc get guardrailsorchestrator -n <namespace>
 ```
 
-2. Patch GuardrailsOrchestrator deployments (adds a readiness probe on port `8034` at `/health`):
+If you don't know the namespace, list them across all namespaces:
+
+```bash
+oc get guardrailsorchestrator -A
+```
+
+If this returns `No resources found`, you can skip Fix 1.
+
+#### Step 1: Fix `/health` and `/info` endpoint errors (deployment readiness probe)
+
+This patches the GuardrailsOrchestrator Deployment(s) to add the expected readiness probe on port `8034` at `/health`.
 
 ```bash
 ./patch-guardrails-deployment.sh <namespace>
 ```
 
-#### Verify
+Verify:
 
 ```bash
 ORCH_ROUTE_HEALTH=$(oc get routes -n <namespace> guardrails-orchestrator-health -o jsonpath='{.spec.host}')
 curl -s https://$ORCH_ROUTE_HEALTH/info | jq
 ```
 
-### GPU deadlock
+If the route name differs, list routes in the namespace and pick the GuardrailsOrchestrator health route:
+
+```bash
+oc get routes -n <namespace>
+```
+
+#### Step 2: Fix OpenTelemetry `spec.otelExporter` incompatibility (CR migration)
+
+If you enabled OpenTelemetry on RHOAI 2.25, the `spec.otelExporter` keys changed in RHOAI 3.x. This script migrates the old fields to the new ones.
+
+1. Check what would be migrated:
+
+```bash
+./migrate-gorch-otel-exporter.sh --namespace <namespace>
+./migrate-gorch-otel-exporter.sh --namespace <namespace> --dry-run
+```
+
+2. Apply the migration:
+
+```bash
+./migrate-gorch-otel-exporter.sh --namespace <namespace> --fix
+```
+
+3. Verify the migrated fields (you should see keys like `otlpProtocol`, `otlpTracesEndpoint`, `otlpMetricsEndpoint`, `enableTraces`, `enableMetrics`):
+
+```bash
+oc get guardrailsorchestrator -n <namespace> <name> -o jsonpath='{.spec.otelExporter}{"\n"}'
+```
+
+### Fix 2: GPU deadlock
 
 This issue can occur when there is a llm deployment and then trustyai service is created in the same namespace. The LLM deployment would be then stuck in `pending`
 
-### Steps to recreate
+#### How to identify
 
-1. Create a namespace
-
-```bash
-oc new-project gpu-deadlock
-```
-
-2. Deploy LLM
+1. Look for an InferenceService predictor that has **both** a Running pod and a Pending pod:
 
 ```bash
-oc apply -f recreate-manifests/deploy-llm.yaml -n gpu-deadlock
+oc get pods -n <namespace> -l component=predictor
 ```
 
-3. Deploy TAS
+Typical symptoms:
+
+- Two pods for the same predictor
+- One pod **Running**, one pod **Pending**
+- Different container counts (e.g. `2/2` vs `0/3`)
+
+2. Use the helper script to check for deadlocks (recommended):
 
 ```bash
-oc apply -f recreate-manifests/deploy-tas.yaml -n gpu-deadlock
-``` 
-
-4. Display pods
-
-```bash
-oc get pods -n gpu-deadlock
+./break-gpu-deadlock.sh --namespace <namespace> --check
 ```
 
-this should return
-
-```text
-llm-minio-container-7f4db4c484-sj86h   1/1     Running   0          2m6s
-llm-predictor-765c89b8b9-8lstm         2/2     Running   0          2m5s
-llm-predictor-fb6f8f687-5478c          0/3     Pending   0          105s
-trustyai-service-6db776464c-jv6r8      2/2     Running   0          105s
-```
-
-Not the pending pod
-
-### Solution
+#### Solution
 
 To avoid this deadlock, you can run script `break-gpu-deadlock.sh` which will delete the pending pod and then re-create it. This will allow the LLM deployment to proceed without being stuck in pending state. 
 
-1. To get help on the script
+1. Fix deadlocks:
 
 ```bash
-./break-gpu-deadlock.sh --help
+./break-gpu-deadlock.sh --namespace <namespace> --fix
 ```
 
-this should return
-
-```text
-Usage: ./break-gpu-deadlock.sh --namespace <namespace> [--check|--fix]
-
-Options:
-  -n, --namespace <name>  Namespace to scan
-  --check                 Check for deadlocks (default)
-  --fix                   Fix detected deadlocks
-```
-
-2. To check for deadlocks
+2. Verify pods are no longer stuck:
 
 ```bash
-./break-gpu-deadlock.sh --namespace gpu-deadlock --check
-```
-
-this should return
-
-```
-DEADLOCK: llm
-  Running: llm-predictor-765c89b8b9-8lstm
-  Pending: llm-predictor-fb6f8f687-5478c
-
-To fix: ./break-gpu-deadlock.sh --namespace gpu-deadlock --fix
-```
-
-3. To fix deadlocks
-
-```bash
-./break-gpu-deadlock.sh --namespace gpu-deadlock --fix
-```
-
-this should return
-
-```text
-DEADLOCK: llm
-  Running: llm-predictor-765c89b8b9-8lstm
-  Pending: llm-predictor-fb6f8f687-5478c
-
-pod "llm-predictor-765c89b8b9-8lstm" deleted
-pod/llm-predictor-fb6f8f687-5478c condition met
-✓ Fixed
-```
-
-4. Check pods again
-
-```bash
-oc get pods -n gpu-deadlock
-```
-
-this should return
-
-```text
-llm-minio-container-7f4db4c484-sj86h   1/1     Running   0          5m35s
-llm-predictor-fb6f8f687-5478c          3/3     Running   0          5m14s
-trustyai-service-6db776464c-jv6r8      2/2     Running   0          5m14s
+oc get pods -n <namespace> -l component=predictor
 ```
 
 ---
