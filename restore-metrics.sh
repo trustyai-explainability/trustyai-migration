@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 #
 # TrustyAI Metrics Restore Script
@@ -7,7 +7,7 @@
 # from a previously created backup file.
 #
 
-set -e
+set -euo pipefail
 
 # Configuration
 NAMESPACE="${TRUSTYAI_NAMESPACE:-}"
